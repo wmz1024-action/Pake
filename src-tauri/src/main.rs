@@ -1,6 +1,10 @@
 // at the top of main.rs - that will prevent the console from showing
 #![windows_subsystem = "windows"]
 extern crate image;
+
+use serde::{Deserialize, Serialize};
+use std::fs::{create_dir_all, File};
+use std::io::Write;
 use tauri_utils::config::{Config, WindowConfig};
 use wry::{
     application::{
@@ -10,6 +14,7 @@ use wry::{
         window::{Fullscreen, Window, WindowBuilder},
     },
     webview::WebViewBuilder,
+    Error,
 };
 
 #[cfg(target_os = "macos")]
@@ -28,10 +33,25 @@ use wry::webview::WebContext;
 
 use dirs::download_dir;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 enum UserEvent {
     DownloadStarted(String, String),
     DownloadComplete(Option<PathBuf>, bool),
+}
+
+pub const STATE_FILENAME: &str = ".window-state";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WindowState {
+    width: f64,
+    height: f64,
+    x: i32,
+    y: i32,
+    maximized: bool,
+    visible: bool,
+    decorated: bool,
+    fullscreen: bool,
 }
 
 fn main() -> wry::Result<()> {
@@ -79,6 +99,14 @@ fn main() -> wry::Result<()> {
             windows_config.unwrap_or_default(),
         )
     };
+
+    let app_dir = dirs::config_dir().unwrap().join("pake");
+    let state_path = app_dir.join(STATE_FILENAME);
+    if state_path.exists() {
+        let file = File::open(state_path)?;
+        let state: WindowState = serde_json::from_reader(file)?;
+        println!("state: {:?}", state);
+    }
 
     #[cfg(target_os = "macos")]
     let WindowConfig {
@@ -224,7 +252,36 @@ fn main() -> wry::Result<()> {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => {
+                let position = webview
+                    .window()
+                    .inner_position()
+                    .expect("Can't get window position");
+
+                let state = WindowState {
+                    width: webview.window().inner_size().width as f64,
+                    height: webview.window().inner_size().height as f64,
+                    x: position.x,
+                    y: position.y,
+                    maximized: webview.window().is_maximized(),
+                    visible: webview.window().is_visible(),
+                    decorated: webview.window().is_decorated(),
+                    fullscreen: webview.window().fullscreen().is_some(),
+                };
+
+                let app_dir = dirs::config_dir().unwrap().join("pake");
+                let state_path = app_dir.join(STATE_FILENAME);
+
+                create_dir_all(&app_dir)
+                    .map_err(Error::Io)
+                    .and_then(|_| File::create(state_path).map_err(Into::into))
+                    .and_then(|mut f| {
+                        f.write_all(serde_json::to_string(&state).unwrap().as_ref())
+                            .map_err(Into::into)
+                    })
+                    .expect("TODO: panic message");
+                *control_flow = ControlFlow::Exit
+            }
             Event::MenuEvent {
                 menu_id,
                 origin: MenuType::MenuBar,
